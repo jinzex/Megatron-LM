@@ -214,7 +214,9 @@ class VocabParallelEmbedding(torch.nn.Module):
             input_mask = (input_ < self.vocab_start_index) | (input_ >= self.vocab_end_index)
             # Mask the input.
             masked_input = input_.clone() - self.vocab_start_index
-            masked_input[input_mask] = 0
+            input_mask_size = input_mask.flatten().nonzero().size()
+            masked_input[input_mask] = torch.randint(0, self.num_embeddings_per_partition, input_mask_size,
+                                                     device=masked_input.device).flatten()
         else:
             masked_input = input_
         # Get the embeddings.

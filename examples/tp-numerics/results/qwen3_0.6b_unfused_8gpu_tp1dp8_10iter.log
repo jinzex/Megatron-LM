@@ -1,0 +1,20 @@
+GPUs: 8 | TP: 1 | PP: 1 | DP: 8 | GA: 1
+GPUs: 8 | TP: 1 | PP: 1 | DP: 8 | GA: 1
+GPUs: 8 | TP: 1 | PP: 1 | DP: 8 | GA: 1
+GPUs: 8 | TP: 1 | PP: 1 | DP: 8 | GA: 1
+GPUs: 8 | TP: 1 | PP: 1 | DP: 8 | GA: 1
+GPUs: 8 | TP: 1 | PP: 1 | DP: 8 | GA: 1
+GPUs: 8 | TP: 1 | PP: 1 | DP: 8 | GA: 1
+GPUs: 8 | TP: 1 | PP: 1 | DP: 8 | GA: 1
+ [2026-03-31 21:58:54] iteration        1/      10 | consumed samples:            8 | elapsed time per iteration (ms): 5496.3 | learning rate: 2.933926E-04 | global batch size:     8 | lm loss: 1.213794E+01 | loss scale: 1.0 | grad norm: 6.944 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-03-31 21:58:55] iteration        2/      10 | consumed samples:           16 | elapsed time per iteration (ms): 247.5 | learning rate: 2.742173E-04 | global batch size:     8 | lm loss: 1.197504E+01 | loss scale: 1.0 | grad norm: 24.697 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-03-31 21:58:55] iteration        3/      10 | consumed samples:           24 | elapsed time per iteration (ms): 176.6 | learning rate: 2.443510E-04 | global batch size:     8 | lm loss: 1.191278E+01 | loss scale: 1.0 | grad norm: 29.581 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-03-31 21:58:55] iteration        4/      10 | consumed samples:           32 | elapsed time per iteration (ms): 177.8 | learning rate: 2.067173E-04 | global batch size:     8 | lm loss: 1.184012E+01 | loss scale: 1.0 | grad norm: 9.677 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-03-31 21:58:55] iteration        5/      10 | consumed samples:           40 | elapsed time per iteration (ms): 176.6 | learning rate: 1.650000E-04 | global batch size:     8 | lm loss: 1.171778E+01 | loss scale: 1.0 | grad norm: 1.355 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-03-31 21:58:55] iteration        6/      10 | consumed samples:           48 | elapsed time per iteration (ms): 176.7 | learning rate: 1.232827E-04 | global batch size:     8 | lm loss: 1.152256E+01 | loss scale: 1.0 | grad norm: 0.881 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-03-31 21:58:56] iteration        7/      10 | consumed samples:           56 | elapsed time per iteration (ms): 175.5 | learning rate: 8.564899E-05 | global batch size:     8 | lm loss: 1.139780E+01 | loss scale: 1.0 | grad norm: 32.274 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-03-31 21:58:56] iteration        8/      10 | consumed samples:           64 | elapsed time per iteration (ms): 174.5 | learning rate: 5.578270E-05 | global batch size:     8 | lm loss: 1.136264E+01 | loss scale: 1.0 | grad norm: 0.827 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-03-31 21:58:56] iteration        9/      10 | consumed samples:           72 | elapsed time per iteration (ms): 174.8 | learning rate: 3.660737E-05 | global batch size:     8 | lm loss: 1.128390E+01 | loss scale: 1.0 | grad norm: 0.647 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ [2026-03-31 21:58:56] iteration       10/      10 | consumed samples:           80 | elapsed time per iteration (ms): 216.2 | learning rate: 3.000000E-05 | global batch size:     8 | lm loss: 1.122246E+01 | loss scale: 1.0 | grad norm: 0.632 | number of skipped iterations:   0 | number of nan iterations:   0 |
+ validation loss at iteration 10 on validation set | lm loss value: 1.122839E+01 | lm loss PPL: 7.523671E+04 | 
+ validation loss at iteration 10 on test set | lm loss value: 1.122314E+01 | lm loss PPL: 7.484211E+04 | 

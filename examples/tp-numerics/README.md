@@ -81,7 +81,7 @@ and show ~99% nonzero diffs.
 ### 1. Install patches
 
 ```bash
-PROJ=/lustre/fs1/portfolios/coreai/projects/coreai_devtech_all/users/jinzex/pre-training
+PROJ=<path-to-pre-training-repo>
 PATCHES=$PROJ/projects/Numerics/tp-numerics/patches
 BRIDGE=$PROJ/third-party/Megatron-Bridge
 MCORE=$BRIDGE/3rdparty/Megatron-LM/megatron/core
@@ -102,8 +102,8 @@ cp $PATCHES/layers.py               $MCORE/tensor_parallel/layers.py
 grep -c "NVTE_TP_INVARIANT_MODE" $TE_MOD/layernorm_linear.py  # must be >= 4
 ```
 
-> MCore patches in `patches/megatron-core/` (clip_grads, batch_invariant_kernels, etc.)
-> are already committed to the workspace MLM. Copy them only if using a different MLM checkout.
+> MCore patches (clip_grads, batch_invariant_kernels, etc.) are committed directly to
+> this branch in `megatron/core/`. No runtime patching needed — just use this branch via PYTHONPATH.
 
 ### 2. Run unit tests
 
@@ -144,14 +144,12 @@ diff <(grep -oP "lm loss: \S+" /tmp/tp1.log) <(grep -oP "lm loss: \S+" /tmp/tp4.
 
 ## Patches
 
-Patches are split into two directories:
+Runtime patches that must be **copied into the container** because TE is a site-package
+(not overridable via PYTHONPATH). Requires **TE 2.9**.
 
-- **`patches/`** — TE and MCore tensor_parallel patches. Must be **copied into the container**
-  at runtime because TE is a site-package (not overridable via PYTHONPATH). Requires **TE 2.9**.
-
-- **`patches/megatron-core/`** — MCore optimizer/transformer patches. Already committed to the
-  workspace MLM and loaded via PYTHONPATH. Copies kept here for reference and for use with other
-  MLM checkouts.
+MCore optimizer/transformer changes (clip_grads, batch_invariant_kernels, etc.) are committed
+directly to the [Megatron-LM branch](https://github.com/jinzex/Megatron-LM/tree/jinzex/tp-invariant-numerics)
+and loaded via PYTHONPATH — no runtime patching needed.
 
 ### Patch Inventory
 
@@ -163,10 +161,10 @@ Patches are split into two directories:
 | 4 | `patches/layers.py` | MCore `ColumnParallelLinear` | TP-invariant output projection BWD |
 | 5 | `patches/backends.py` | TE DPA backends | FA3 num_splits passthrough (TE 2.9) |
 | 6 | `patches/dot_product_attention.py` | TE DPA | FA3 num_splits passthrough (TE 2.9) |
-| 7 | `patches/megatron-core/clip_grads.py` | MCore optimizer | Float64 grad norm + pow2 clip_coeff |
-| 8 | `patches/megatron-core/batch_invariant_kernels.py` | MCore BIK | TP-invariant RMSNorm dgamma + BIK fixes |
-| 9 | `patches/megatron-core/transformer_config.py` | MCore config | Allow unfused attention with BIK |
-| 10 | `patches/megatron-core/transformer_engine.py` | MCore TE ext | TE 2.9 num_splits warning |
+| 7 | `megatron/core/optimizer/clip_grads.py` | MCore optimizer | Float64 grad norm + pow2 clip_coeff |
+| 8 | `megatron/core/.../batch_invariant_kernels.py` | MCore BIK | TP-invariant RMSNorm dgamma + BIK fixes |
+| 9 | `megatron/core/.../transformer_config.py` | MCore config | Allow unfused attention with BIK |
+| 10 | `megatron/core/.../transformer_engine.py` | MCore TE ext | TE 2.9 num_splits warning |
 
 Original (unpatched) files are in `patches/*.orig` for diffing.
 
@@ -264,11 +262,7 @@ tp-numerics/
     layernorm_linear.py, linear.py          #   TP-invariant GEMM + deinterleave
     backends.py, dot_product_attention.py   #   FA3 num_splits (TE 2.9)
     cross_entropy.py, layers.py             #   MCore tensor_parallel patches
-    megatron-core/                          # MCore patches (in workspace MLM)
-      clip_grads.py                         #   Float64 grad norm + pow2 clip
-      batch_invariant_kernels.py            #   RMSNorm dgamma + BIK fixes
-      transformer_config.py, transformer_engine.py
-    *.orig                                  #   Originals for diffing
+  # MCore patches are committed directly to megatron/core/ in this branch
   results/                                  # Validation log files
 ```
 

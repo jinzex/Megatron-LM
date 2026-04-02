@@ -5,7 +5,7 @@ Uses nproc_per_node=TP_SIZE so DP=1, PP=1, EP=1 — only TP varies.
 Toy MoE (~0.5B params) fits on 1 GPU.
 
 Usage:
-    PROJ=/lustre/fs1/portfolios/coreai/projects/coreai_devtech_all/users/jinzex/pre-training
+    PROJ=<path-to-pre-training-repo>
     BRIDGE=$PROJ/third-party/Megatron-Bridge
     SCRIPT=$PROJ/projects/Numerics/tp-numerics/validate_e2e_moe_qwen3_toy.py
 
@@ -86,11 +86,6 @@ config.model.use_cpu_initialization = True
 config.model.deterministic_mode = True
 config.model.cross_entropy_loss_fusion = False
 
-# Isolation test: disable aux loss to check if it's the source of backward divergence
-if os.environ.get("NO_AUX_LOSS", "0") == "1":
-    config.model.moe_aux_loss_coeff = 0.0
-    print("MoE auxiliary loss DISABLED (moe_aux_loss_coeff=0)")
-
 # Attention backend
 _attn_backend = os.environ.get("ATTN_BACKEND", "").lower()
 if _attn_backend:
@@ -156,51 +151,5 @@ NVTE_TP_INVARIANT_MODE: {os.environ.get('NVTE_TP_INVARIANT_MODE', '0')}
 BIK: {USE_BIK}
 ============================================================
 """)
-
-# Dump parallel group info for debugging
-if os.environ.get("DUMP_GROUPS", "0") == "1":
-    import megatron.core.parallel_state as _ps
-    def _dump_groups_hook(config_unused):
-        if _ps.get_tensor_model_parallel_rank() == 0:
-            print(f"\n=== PARALLEL GROUPS (rank 0) ===")
-            print(f"  TP size: {_ps.get_tensor_model_parallel_world_size()}")
-            print(f"  DP size: {_ps.get_data_parallel_world_size()}")
-            try:
-                print(f"  EP size: {_ps.get_expert_model_parallel_world_size()}")
-            except: pass
-            try:
-                edp = _ps.get_data_parallel_group(with_expert_parallel=True)
-                print(f"  Expert DP group size: {edp.size()}")
-            except Exception as e:
-                print(f"  Expert DP group: {e}")
-            # Check what group expert weights allreduce over
-            from megatron.core.distributed import distributed_data_parallel as _ddp_mod
-            print(f"=== END GROUPS ===\n")
-    import megatron.training.training as _train_mod
-    _orig_setup = getattr(_train_mod, 'setup_model_and_optimizer', None)
-
-if os.environ.get("DUMP_GRADS", "0") == "1":
-    import torch, hashlib
-    from megatron.core import parallel_state as ps
-    import megatron.core.optimizer.clip_grads as _cg
-    import megatron.core.optimizer.optimizer as _opt_mod
-
-    _orig_get_norm = _cg.get_grad_norm_fp32
-    _dump_file = os.environ.get("DUMP_GRADS_FILE", "/tmp/moe_grads.txt")
-
-    def _patched_get_norm(grads_for_norm, *a, **kw):
-        result = _orig_get_norm(grads_for_norm, *a, **kw)
-        if ps.get_tensor_model_parallel_rank() == 0:
-            with open(_dump_file, "w") as f:
-                for i, g in enumerate(grads_for_norm):
-                    gf = g.float()
-                    h = hashlib.md5(gf.cpu().contiguous().numpy().tobytes()).hexdigest()[:12]
-                    f.write(f"{i:3d} shape={str(list(g.shape)):30s} norm={gf.norm().item():.10f} hash={h}\n")
-                f.write(f"total_norm={result:.10f}\n")
-        return result
-
-    # Patch at both module level AND the imported reference in optimizer.py
-    _cg.get_grad_norm_fp32 = _patched_get_norm
-    _opt_mod.get_grad_norm_fp32 = _patched_get_norm
 
 pretrain(config=config, forward_step_func=forward_step)

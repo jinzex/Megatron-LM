@@ -5,7 +5,7 @@ Uses nproc_per_node=TP_SIZE so DP=1, PP=1 — only TP varies.
 Qwen3-0.6B (28 layers, H=1024, FFN=3072, 16 heads) fits on 1 GPU.
 
 Usage:
-    PROJ=/lustre/fs1/portfolios/coreai/projects/coreai_devtech_all/users/jinzex/pre-training
+    PROJ=<path-to-pre-training-repo>
     BRIDGE=$PROJ/third-party/Megatron-Bridge
     SCRIPT=$PROJ/projects/Numerics/tp-numerics/validate_e2e_dense_qwen3_0.6b.py
 
@@ -75,7 +75,7 @@ config.model.use_cpu_initialization = True
 config.model.deterministic_mode = True
 config.model.cross_entropy_loss_fusion = False
 
-# Attention backend: ATTN_BACKEND env var overrides (unfused/flash/fused/auto)
+# Override attention backend for determinism testing
 _attn_backend = os.environ.get("ATTN_BACKEND", "").lower()
 if _attn_backend:
     config.model.attention_backend = getattr(AttnBackend, _attn_backend)
@@ -101,7 +101,7 @@ config.ddp.data_parallel_sharding_strategy = "no_shard"
 # Disable gradient clipping for TP-invariant mode (validation)
 if os.environ.get("NO_CLIP", "0") == "1":
     config.optimizer.clip_grad = float('inf')
-    print(f"Gradient clipping DISABLED (clip_grad=inf)")
+    print("Gradient clipping DISABLED (clip_grad=inf)")
 
 config.logger.tensorboard_dir = "/tmp/tp-inv-600m/tensorboard"
 config.logger.log_interval = 1

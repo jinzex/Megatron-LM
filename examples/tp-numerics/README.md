@@ -162,9 +162,9 @@ and loaded via PYTHONPATH — no runtime patching needed.
 | 5 | `patches/backends.py` | TE DPA backends | FA3 num_splits passthrough (TE 2.9) |
 | 6 | `patches/dot_product_attention.py` | TE DPA | FA3 num_splits passthrough (TE 2.9) |
 | 7 | `megatron/core/optimizer/clip_grads.py` | MCore optimizer | Float64 grad norm + pow2 clip_coeff |
-| 8 | `megatron/core/.../batch_invariant_kernels.py` | MCore BIK | TP-invariant RMSNorm dgamma + BIK fixes |
-| 9 | `megatron/core/.../transformer_config.py` | MCore config | Allow unfused attention with BIK |
-| 10 | `megatron/core/.../transformer_engine.py` | MCore TE ext | TE 2.9 num_splits warning |
+| 8 | `megatron/core/transformer/custom_layers/batch_invariant_kernels.py` | MCore BIK | TP-invariant RMSNorm dgamma + BIK fixes |
+| 9 | `megatron/core/transformer/transformer_config.py` | MCore config | Allow unfused attention with BIK |
+| 10 | `megatron/core/extensions/transformer_engine.py` | MCore TE ext | TE 2.9 num_splits warning |
 
 Original (unpatched) files are in `patches/*.orig` for diffing.
 

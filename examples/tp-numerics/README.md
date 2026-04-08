@@ -117,14 +117,23 @@ All logs in `results/`.
 All three attention backends (unfused, auto/cuDNN, flash/FA3) achieve TP-invariance —
 attention is intra-rank with no cross-rank reduction. Recommended: **unfused** (no extra setup).
 
-Dense E2E sample (all TP degrees produce identical values):
+### Qwen3-8B: TP=4 vs TP=8 (bitwise identical, 100 iters)
 
-| Iter | Loss | Grad Norm |
-|------|------|-----------|
-| 1 | 1.213320E+01 | 18.259 |
-| 10 | 1.159266E+01 | 1.463 |
-| 50 | 8.068619E+00 | 0.623 |
-| 100 | 8.277067E+00 | 0.542 |
+![TP=4 vs TP=8 loss curves](assets/tp4_vs_tp8_invariant.png)
+
+### Qwen3-8B: TP-invariant vs baseline (TP=4)
+
+![TP-invariant vs baseline](assets/invariant_vs_baseline_tp4.png)
+
+## Performance Overhead (Qwen3-8B, 4x H100, TP=4, auto/cuDNN)
+
+| Mode | Avg step (ms) | Overhead | What changes |
+|------|-------------|----------|-------------|
+| Baseline | 227.5 | — | Standard training |
+| **TP-invariant fwd** | 386.7 | **+70%** | 2/4 fwd GEMMs all-gather + cross-entropy |
+| TP-invariant E2E | 598.2 | +163% | All 7 components (fwd+bwd) |
+
+Fwd-only overhead (+70%) is the relevant cost for RL training where only forward logits need TP-invariance. Full E2E (+163%) is for debugging/validation only.
 
 ## MoE E2E
 

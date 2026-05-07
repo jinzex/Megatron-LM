@@ -50,6 +50,72 @@ from megatron.bridge.recipes.qwen import qwen3_600m_pretrain_config
 from megatron.bridge.training.gpt_step import forward_step
 from megatron.bridge.training.pretrain import pretrain
 
+# DUMP_DIR=<path> HW_TAG=<b300|h100> hooks each TransformerLayer's output, model logits,
+# and loss on iter 1, saves to {DUMP_DIR}/e2e_dump_{HW_TAG}.pt, then continues.
+import torch as _torch
+from megatron.bridge.training import gpt_step as _gpt_step_mod
+
+_DUMP_DIR = os.environ.get("DUMP_DIR")
+if _DUMP_DIR:
+    _HW_TAG = os.environ.get("HW_TAG", "unknown")
+    _DUMPS = {}
+    _DONE = [False]
+    _HOOKED = [False]
+    _orig_fs = _gpt_step_mod.forward_step
+    _orig_fsc = _gpt_step_mod._forward_step_common
+
+    def _layer_hook(name):
+        def hk(mod, inp, out):
+            t = out[0] if isinstance(out, tuple) else out
+            _DUMPS[name] = t.detach().to("cpu", _torch.float32).clone()
+        return hk
+
+    def _hooked_fsc(state, data_iterator, model, return_schedule_plan=False):
+        if not _HOOKED[0]:
+            from megatron.core.utils import unwrap_model
+            base = unwrap_model(model)
+            if isinstance(base, list):
+                base = base[0]
+            # Snapshot a few key weight tensors to verify init determinism
+            sd = base.state_dict()
+            for k in list(sd.keys())[:3] + [k for k in sd.keys() if "layers.0." in k][:3]:
+                if isinstance(sd[k], _torch.Tensor):
+                    _DUMPS[f"weight::{k}"] = sd[k].detach().to("cpu", _torch.float32).clone()
+            for i, layer in enumerate(base.decoder.layers):
+                layer.register_forward_hook(_layer_hook(f"layer_{i:02d}_out"))
+            _HOOKED[0] = True
+            print(f"[DUMP] hooks on {len(base.decoder.layers)} layers, weights: {sum(1 for k in _DUMPS if k.startswith('weight::'))}", flush=True)
+        output, loss_mask = _orig_fsc(state, data_iterator, model, return_schedule_plan)
+        if not _DONE[0]:
+            _DUMPS["model_output_per_token_loss"] = output.detach().to("cpu", _torch.float32).clone()
+        return output, loss_mask
+
+    def _hooked_fs(state, data_iterator, model, return_schedule_plan=False):
+        output, loss_function = _orig_fs(state, data_iterator, model, return_schedule_plan)
+        if not _DONE[0]:
+            _orig_lf = loss_function
+            def _wrapped_loss(output_tensor):
+                lo = _orig_lf(output_tensor)
+                if not _DONE[0]:
+                    if isinstance(lo, tuple):
+                        _DUMPS["loss"] = lo[0].detach().to("cpu", _torch.float32).clone()
+                        if len(lo) >= 3 and isinstance(lo[2], dict) and "lm loss" in lo[2]:
+                            _DUMPS["lm_loss_reporting"] = lo[2]["lm loss"].detach().to("cpu", _torch.float32).clone()
+                    else:
+                        _DUMPS["loss"] = lo.detach().to("cpu", _torch.float32).clone()
+                    path = f"{_DUMP_DIR}/e2e_dump_{_HW_TAG}.pt"
+                    _torch.save(_DUMPS, path)
+                    print(f"[DUMP] saved {path} ({len(_DUMPS)} keys)", flush=True)
+                    _DONE[0] = True
+                return lo
+            return output, _wrapped_loss
+        return output, loss_function
+
+    _gpt_step_mod._forward_step_common = _hooked_fsc
+    _gpt_step_mod.forward_step = _hooked_fs
+    forward_step = _hooked_fs  # rebind script-local symbol passed to pretrain()
+    print(f"[DUMP] forward_step wrapped, will dump to {_DUMP_DIR}/e2e_dump_{_HW_TAG}.pt", flush=True)
+
 tp_size = int(os.environ["TP_SIZE"])
 train_iters = int(os.environ["TRAIN_ITERS"])
 world_size_env = int(os.environ.get("WORLD_SIZE", 1))

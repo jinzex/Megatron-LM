@@ -482,20 +482,48 @@ def _log_softmax_batch_invariant(input, dim, _half_to_float):
 
 
 def mean_batch_invariant(input, dim, keepdim=False, dtype: torch.dtype | None = None):
-    """Batch-invariant replacement for `aten::mean.dim` over one or more dimensions."""
+    """Batch-invariant replacement for `aten::mean.dim` over one or more dimensions.
+
+    Determinism across SM architectures:
+    - Full reduction (dim=[]): two-stage Triton via `mean_dim`. Stage 1 reduces
+      M=4096 chunks in parallel; stage 2 reduces the M partial means serially.
+      Both stages use fixed launch shape → cross-SM deterministic.
+    - Single-dim: `mean_dim` (Triton, fixed reduction order).
+    - Multi-dim partial: TODO — currently uses non-deterministic torch.sum.
+    """
     assert dtype is None or dtype == torch.float32, f"unsupported dtype: {dtype}"
+    if not dim:
+        # Full reduction: two-stage parallel deterministic via Triton mean_dim.
+        flat = input.reshape(-1)
+        n = flat.numel()
+        M = 4096  # fixed parallelism, SM-independent
+        if n % M == 0:
+            chunk = n // M
+            partials = mean_dim(flat.reshape(M, chunk), 1, keepdim=False)
+            return mean_dim(partials.reshape(1, M, 1), 1, keepdim=False).reshape(())
+        # Fallback: single-block (slow but deterministic).
+        return mean_dim(flat, 0, keepdim=False)
     if len(dim) == 1:
         return mean_dim(input, dim[0], keepdim=keepdim)
-    else:
-        assert input.dtype in {
-            torch.float16,
-            torch.bfloat16,
-            torch.float32,
-        }, "only float types supported for now"
-        n_elems = 1
-        for d in dim:
-            n_elems *= input.shape[d]
-        return torch.sum(input, dim=dim, keepdim=keepdim, dtype=torch.float32) / n_elems
+    # TODO: multi-dim partial reduction is non-deterministic across SMs.
+    # Use Triton (e.g., permute+reshape+mean_dim) to close this gap.
+    assert input.dtype in {
+        torch.float16,
+        torch.bfloat16,
+        torch.float32,
+    }, "only float types supported for now"
+    n_elems = 1
+    for d in dim:
+        n_elems *= input.shape[d]
+    return torch.sum(input, dim=dim, keepdim=keepdim, dtype=torch.float32) / n_elems
+
+
+# TODO: BIK does not patch aten::sum, aten::var, aten::std, aten::norm.
+# These reductions go through native PyTorch CUDA kernels and are not
+# cross-SM deterministic — meaning E2E loss reductions (e.g., Megatron's
+# `torch.sum(losses*mask) / mask.sum()`) will diverge slightly across
+# SM_90/SM_100 even with BIK on. Add Triton fixed-order kernels to close
+# this gap.
 
 
 AttentionBlockSize = namedtuple("AttentionBlockSize", ["block_m", "block_n"])

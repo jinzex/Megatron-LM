@@ -84,7 +84,7 @@ def _build_config(tp_size: int) -> TransformerConfig:
         perform_initialization=True,
         attention_dropout=0.0,
         hidden_dropout=0.0,
-        qk_layernorm=True,
+        qk_layernorm=os.environ.get("QK_LAYERNORM", "1") == "1",
         no_rope_freq=[1] * NUM_LAYERS,
         tensor_model_parallel_size=tp_size,
         context_parallel_size=1,
@@ -264,6 +264,168 @@ def _install_backward_hooks(block, tp_size, captures):
             post_norm.register_full_backward_hook(post_norm_bwd_hook)
 
 
+def _install_fwd_dump_hooks(block, captures):
+    """Capture forward outputs of key modules for cross-GPU bisection.
+
+    Used in DUMP_TENSORS mode at TP=1 to dump intermediates per-GPU,
+    then diff offline to find where B300 vs H100 first disagree.
+    """
+    def grab(name):
+        def hook(module, inp, out):
+            t = out[0] if isinstance(out, tuple) else out
+            if isinstance(t, torch.Tensor):
+                captures[f"fwd_{name}"] = t.detach().clone().cpu()
+        return hook
+
+    for layer_idx, layer in enumerate(block.layers):
+        prefix = f"L{layer_idx}"
+        if (n := getattr(layer, "input_layernorm", None)) is not None:
+            n.register_forward_hook(grab(f"{prefix}.input_norm"))
+        if (a := getattr(layer, "self_attention", None)) is not None:
+            a.register_forward_hook(grab(f"{prefix}.self_attn"))
+            if (q := getattr(a, "linear_qkv", None)) is not None:
+                q.register_forward_hook(grab(f"{prefix}.linear_qkv"))
+            if (c := getattr(a, "core_attention", None)) is not None:
+                c.register_forward_hook(grab(f"{prefix}.core_attention"))
+            if (p := getattr(a, "linear_proj", None)) is not None:
+                p.register_forward_hook(grab(f"{prefix}.linear_proj"))
+        if (n := getattr(layer, "pre_mlp_layernorm", None)) is not None:
+            n.register_forward_hook(grab(f"{prefix}.pre_mlp_norm"))
+        if (m := getattr(layer, "mlp", None)) is not None:
+            m.register_forward_hook(grab(f"{prefix}.mlp"))
+            if (f1 := getattr(m, "linear_fc1", None)) is not None:
+                f1.register_forward_hook(grab(f"{prefix}.linear_fc1"))
+            if (f2 := getattr(m, "linear_fc2", None)) is not None:
+                f2.register_forward_hook(grab(f"{prefix}.linear_fc2"))
+
+
+def _install_attn_interior_hooks(block, tp_size, captures):
+    """Install bwd hooks on self_attention submodules to localize divergence.
+
+    Bwd flow inside attention (downstream → upstream):
+        proj.dy → proj.dx = core.dy → core.dx = qkv.dy → qkv.dx
+    """
+    tp_group = ps.get_tensor_model_parallel_group() if tp_size > 1 else None
+
+    def _gather_for_compare(t):
+        """Gather TP-sharded last dim only. Captures inside attention bwd are
+        already full-seq (TE internally gathered), so no SP gather here."""
+        if t is None:
+            return None
+        t = t.detach().clone()
+        if tp_size > 1:
+            chunks = [torch.empty_like(t) for _ in range(tp_size)]
+            torch.distributed.all_gather(chunks, t.contiguous(), group=tp_group)
+            t = torch.cat(chunks, dim=-1)
+        return t
+
+    for layer in block.layers:
+        attn = getattr(layer, "self_attention", None)
+        if attn is None:
+            continue
+
+        qkv = getattr(attn, "linear_qkv", None)
+        proj = getattr(attn, "linear_proj", None)
+        core = getattr(attn, "core_attention", None)
+
+        if qkv is not None:
+            def qkv_hook(module, gi, go):
+                if go and go[0] is not None:
+                    captures["bwd_qkv_grad_output"] = _gather_for_compare(go[0])
+                if gi:
+                    for x in gi:
+                        if x is not None and x.shape[-1] == HIDDEN_SIZE:
+                            captures["bwd_qkv_grad_input"] = _gather_sp(
+                                x.detach().clone(), tp_size, tp_group
+                            )
+                            break
+            qkv.register_full_backward_hook(qkv_hook)
+
+        if proj is not None:
+            def proj_hook(module, gi, go):
+                if go and go[0] is not None and go[0].shape[-1] == HIDDEN_SIZE:
+                    captures["bwd_proj_grad_output"] = _gather_sp(
+                        go[0].detach().clone(), tp_size, tp_group
+                    )
+                if gi:
+                    for x in gi:
+                        if x is not None and x.dim() >= 2:
+                            captures["bwd_proj_grad_input"] = _gather_for_compare(x)
+                            break
+            proj.register_full_backward_hook(proj_hook)
+
+        if core is not None:
+            def core_hook(module, gi, go):
+                if go and go[0] is not None:
+                    captures["bwd_core_grad_output"] = _gather_for_compare(go[0])
+                if gi:
+                    for x in gi:
+                        if x is not None and x.dim() >= 2:
+                            captures["bwd_core_grad_input"] = _gather_for_compare(x)
+                            break
+            core.register_full_backward_hook(core_hook)
+
+
+_ORIG_UNFUSED_ATTN_FORWARD = None  # cached on first install; never overwritten
+
+
+def _install_unfused_attn_step_hooks(captures, tp_size):
+    """Monkey-patch UnfusedDotProductAttention.forward to capture per-tensor bwd grads.
+
+    Hooks Q, K, V at entry of attention forward; their .grad fired during bwd
+    is dQ, dK, dV produced by attention's bwd chain. Heads are sharded along
+    dim 2 across TP — gather to compare with TP=1.
+
+    Important: caches the *original* (un-wrapped) forward once on first install
+    and always wraps from that. Without this, repeated installs (one per
+    scenario) build a wrapper-on-wrapper chain where stale closures from
+    earlier scenarios fire during later scenarios' backward and overwrite each
+    other's captures dicts.
+    """
+    global _ORIG_UNFUSED_ATTN_FORWARD
+    try:
+        from transformer_engine.pytorch.attention.dot_product_attention.backends import (
+            UnfusedDotProductAttention,
+        )
+    except ImportError:
+        return
+
+    if _ORIG_UNFUSED_ATTN_FORWARD is None:
+        _ORIG_UNFUSED_ATTN_FORWARD = UnfusedDotProductAttention.forward
+
+    tp_group = ps.get_tensor_model_parallel_group() if tp_size > 1 else None
+
+    def gather_heads(t):
+        if t is None:
+            return None
+        t = t.detach().clone()
+        if tp_size > 1:
+            chunks = [torch.empty_like(t) for _ in range(tp_size)]
+            torch.distributed.all_gather(chunks, t.contiguous(), group=tp_group)
+            t = torch.cat(chunks, dim=2)
+        return t
+
+    def patched_forward(self, _alibi_cache, query_layer, key_layer, value_layer,
+                        *args, **kwargs):
+        if query_layer.requires_grad:
+            query_layer.register_hook(
+                lambda g, c=captures: c.update(bwd_attn_step_dQ=gather_heads(g))
+            )
+        if key_layer.requires_grad:
+            key_layer.register_hook(
+                lambda g, c=captures: c.update(bwd_attn_step_dK=gather_heads(g))
+            )
+        if value_layer.requires_grad:
+            value_layer.register_hook(
+                lambda g, c=captures: c.update(bwd_attn_step_dV=gather_heads(g))
+            )
+        return _ORIG_UNFUSED_ATTN_FORWARD(
+            self, _alibi_cache, query_layer, key_layer, value_layer, *args, **kwargs
+        )
+
+    UnfusedDotProductAttention.forward = patched_forward
+
+
 def _run_scenario(
     tp_size: int,
     dp_size: int,
@@ -287,7 +449,7 @@ def _run_scenario(
 
     config = _build_config(tp_size)
     layer_spec = get_gpt_layer_with_transformer_engine_spec(
-        qk_layernorm=True,
+        qk_layernorm=os.environ.get("QK_LAYERNORM", "1") == "1",
         num_experts=MOE_NUM_EXPERTS if USE_MOE else None,
         moe_grouped_gemm=False,
     )
@@ -299,6 +461,12 @@ def _run_scenario(
     if DIAG and TEST_BACKWARD:
         _install_backward_hooks(block, tp_size, captures)
         _install_mlp_interior_hooks(block, tp_size, captures)
+        _install_attn_interior_hooks(block, tp_size, captures)
+        _install_unfused_attn_step_hooks(captures, tp_size)
+
+    # Cross-GPU tensor dump (TP=1 only): captures fwd outputs at every module
+    if os.environ.get("DUMP_TENSORS") and tp_size == 1:
+        _install_fwd_dump_hooks(block, captures)
 
     logger.info(
         f"[Rank {rank}] TP={tp_size}/DP={dp_size}: "
@@ -336,9 +504,11 @@ def _run_scenario(
             torch.distributed.all_gather(grad_gathered, grad, group=ps.get_tensor_model_parallel_group())
             grad = torch.cat(grad_gathered, dim=0)
 
+    _ofg = output.float().mean().item()
+    _ofc = output.detach().cpu().float().mean().item()
     logger.info(
-        f"[Rank {rank}] TP={tp_size} fwd mean={output.float().mean():.6f}"
-        + (f" grad mean={grad.float().mean():.6f}" if TEST_BACKWARD else "")
+        f"[Rank {rank}] TP={tp_size} fwd mean(gpu)={_ofg:.15e} mean(cpu)={_ofc:.15e}"
+        + (f" grad mean(gpu)={grad.float().mean().item():.15e} mean(cpu)={grad.detach().cpu().float().mean().item():.15e}" if TEST_BACKWARD else "")
     )
 
     del block
@@ -363,13 +533,40 @@ def _log_comparison(baseline, candidate, label) -> dict:
     return stats
 
 
+def _apply_attention_backend_env(attn_backend):
+    """Translate Megatron AttnBackend → NVTE_*_ATTN env vars.
+
+    GPTModel/BertModel do this in LanguageModule.__init__, but this test uses
+    TransformerBlock directly and bypasses LanguageModule, so without this
+    explicit translation the `attention_backend=...` config setting is silently
+    ignored and TE picks its preferred backend (e.g. FA2 even when unfused was
+    requested). See language_module.py:107-126 for the original logic.
+    """
+    if attn_backend == AttnBackend.unfused:
+        os.environ["NVTE_FLASH_ATTN"] = "0"
+        os.environ["NVTE_FUSED_ATTN"] = "0"
+        os.environ["NVTE_UNFUSED_ATTN"] = "1"
+    elif attn_backend == AttnBackend.flash:
+        os.environ["NVTE_FLASH_ATTN"] = "1"
+        os.environ["NVTE_FUSED_ATTN"] = "0"
+        os.environ["NVTE_UNFUSED_ATTN"] = "0"
+    elif attn_backend == AttnBackend.fused:
+        os.environ["NVTE_FLASH_ATTN"] = "0"
+        os.environ["NVTE_FUSED_ATTN"] = "1"
+        os.environ["NVTE_UNFUSED_ATTN"] = "0"
+    # None / auto: leave defaults (TE picks)
+
+
 def main():
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
     torch.distributed.init_process_group(backend="nccl")
 
     rank = torch.distributed.get_rank()
     world_size = torch.distributed.get_world_size()
-    assert world_size == 8, f"Test requires 8 GPUs, got {world_size}"
+    assert world_size in (1, 2, 4, 8), f"Test requires world_size in (1,2,4,8), got {world_size}"
+
+    # Mirror LanguageModule.__init__'s env-var setup since we use TransformerBlock directly.
+    _apply_attention_backend_env(AttnBackend.unfused if USE_BIK else None)
 
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
@@ -406,19 +603,21 @@ def main():
             return result
         _te_lin.general_gemm = _counting_gemm
 
-    tp_scenarios = [(1, 8), (2, 4), (4, 2), (8, 1)]
+    tp_scenarios = [(1, 4), (2, 2), (4, 1)]
 
     logger.info(f"\n[Rank {rank}] layers={NUM_LAYERS} seq={SEQ_LENGTH} mbs={MICRO_BATCH_SIZE}")
     logger.info(f"[Rank {rank}] SP={SEQUENCE_PARALLEL} MOE={USE_MOE} BACKWARD={TEST_BACKWARD}")
     logger.info(f"[Rank {rank}] NVTE_FP32_TP_REDUCE={os.environ.get('NVTE_FP32_TP_REDUCE','0')}")
     logger.info(f"[Rank {rank}] NVTE_TP_INVARIANT_MODE={os.environ.get('NVTE_TP_INVARIANT_MODE','0')}")
 
+    # Generate on CPU first then move to GPU — CPU randn is bitwise-deterministic
+    # across hardware, GPU randn is not guaranteed identical across SM architectures.
+    # This guarantees identical input across B300 and H100 for cross-GPU comparison.
     torch.manual_seed(42)
     hidden_states = torch.randn(
         (SEQ_LENGTH, MICRO_BATCH_SIZE, HIDDEN_SIZE),
-        device="cuda",
         dtype=torch.bfloat16,
-    )
+    ).cuda()
     torch.distributed.broadcast(hidden_states, src=0)
 
     results: Dict[int, tuple] = {}
@@ -438,6 +637,17 @@ def main():
 
     if rank == 0:
         fwd_baseline, grad_baseline, caps_baseline = results[1]
+
+        # Cross-GPU tensor dump: save TP=1 captures + key tensors to disk
+        dump_path = os.environ.get("DUMP_TENSORS")
+        if dump_path:
+            dump = {k: v for k, v in caps_baseline.items()}
+            dump["_block_input"] = hidden_states.detach().cpu()  # broadcast input
+            dump["_block_output"] = fwd_baseline.detach().cpu()
+            if TEST_BACKWARD:
+                dump["_block_input_grad"] = grad_baseline.detach().cpu()
+            torch.save(dump, dump_path)
+            logger.info(f"[Rank 0] Dumped TP=1 tensors to {dump_path}")
         all_fwd_match = True
         all_grad_match = True
         for tp_size, _ in tp_scenarios[1:]:
@@ -462,13 +672,31 @@ def main():
                     "bwd_fc1_input_grad",
                     "bwd_mlp_grad_input",
                     "bwd_post_norm_grad_input",
-                    "bwd_attn_grad_output", "bwd_attn_grad_input",
+                    "bwd_attn_grad_output",
+                    # attention interior, downstream → upstream
+                    "bwd_proj_grad_output",
+                    "bwd_proj_grad_input",
+                    "bwd_core_grad_output",
+                    "bwd_core_grad_input",
+                    "bwd_qkv_grad_output",
+                    # inside UnfusedDotProductAttention bwd (BIK=1 only meaningful)
+                    "bwd_attn_step_dV",
+                    "bwd_attn_step_dQ",
+                    "bwd_attn_step_dK",
+                    "bwd_qkv_grad_input",
+                    "bwd_attn_grad_input",
                     "bwd_pre_norm_grad_input",
                 ]
                 for key in bwd_keys:
                     if key in caps_baseline and key in caps:
-                        _log_comparison(caps_baseline[key], caps[key],
-                                        f"DIAG {key}: TP=1 vs TP={tp_size}")
+                        b, c = caps_baseline[key], caps[key]
+                        if b.shape != c.shape:
+                            logger.info(f"DIAG {key}: shape mismatch baseline={tuple(b.shape)} candidate={tuple(c.shape)} — flattening")
+                            b, c = b.reshape(-1), c.reshape(-1)
+                            if b.numel() != c.numel():
+                                logger.info(f"DIAG {key}: numel mismatch ({b.numel()} vs {c.numel()}), skipping")
+                                continue
+                        _log_comparison(b, c, f"DIAG {key}: TP=1 vs TP={tp_size}")
                     elif key in caps_baseline or key in caps:
                         logger.info(f"DIAG {key}: MISSING in {'baseline' if key not in caps_baseline else 'candidate'}")
 

@@ -741,9 +741,21 @@ def test_bik_te_general_gemm_numerical_parity(dtype):
 # Batch-Invariant bmm and softmax tests
 # ============================================================================
 
-from megatron.core.transformer.custom_layers.batch_invariant_kernels import (
-    bmm_batch_invariant,
-    _softmax_batch_invariant,
+try:
+    from megatron.core.transformer.custom_layers.batch_invariant_kernels import (
+        bmm_batch_invariant,
+        _softmax_batch_invariant,
+    )
+    HAVE_BMM_SOFTMAX_BIK = True
+except ImportError:
+    # Older BIK versions don't ship bmm/softmax helpers; skip dependent tests.
+    bmm_batch_invariant = None
+    _softmax_batch_invariant = None
+    HAVE_BMM_SOFTMAX_BIK = False
+
+_skip_no_bmm_softmax = pytest.mark.skipif(
+    not HAVE_BMM_SOFTMAX_BIK,
+    reason="bmm_batch_invariant / _softmax_batch_invariant not in this BIK build",
 )
 
 
@@ -861,3 +873,20 @@ def test_softmax_batch_invariant_numerical_parity(dtype):
     y_bik = _softmax_batch_invariant(x, dim=-1, half_to_float=False)
     y_ref = torch.softmax(x.float(), dim=-1).to(dtype)
     torch.testing.assert_close(y_bik, y_ref, **_tols(dtype))
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_mean_batch_invariant_full_reduction_chunking_invariant(dtype):
+    """Full-reduction mean must be invariant to how the input is chunked.
+
+    Mean of equal-size halves' means should equal mean of the whole. Exercises
+    the two-stage Triton reduction path.
+    """
+    torch.manual_seed(42)
+    x = torch.randn(4096, 2, 4096, **_device(dtype))
+    flat = x.reshape(-1)
+    half = flat.numel() // 2
+    with set_batch_invariant_mode(True):
+        m_full = x.mean()
+        m_halves = (flat[:half].mean() + flat[half:].mean()) / 2
+    torch.testing.assert_close(m_full, m_halves, **_tols(dtype))

@@ -14,7 +14,9 @@ regardless of Tensor Parallelism (TP) degree — TP=1, 2, 4, 8 produce the same 
 | **Dense** | TP=1/2/4/8 bitwise identical | TP=1/2/4 bitwise identical loss+grad_norm, **100 iters** |
 | **MoE** | TP=1/2/4/8 bitwise identical (BIK) | Pending |
 
-Config: `BIK=1 NVTE_TP_INVARIANT_MODE=1` | TE 2.9 | Qwen3-0.6B / 8B | H100
+Config: `BIK=1 NVTE_TP_INVARIANT_MODE=1` | TE 2.9 | Qwen3-0.6B / 8B | H100, B300
+
+**Cross-architecture:** B300 ≡ H100 bitwise (Qwen3-0.6B TP=1, Qwen3-8B TP=4, 100 iters). See [Cross-Architecture Validation](#cross-architecture-validation-b300-vs-h100).
 
 ## Baseline vs TP-Invariant (Qwen3-0.6B)
 
@@ -124,6 +126,29 @@ attention is intra-rank with no cross-rank reduction. Recommended: **unfused** (
 ### Qwen3-8B: TP-invariant vs baseline (TP=4)
 
 ![TP-invariant vs baseline](assets/invariant_vs_baseline_tp4.png)
+
+## Cross-Architecture Validation (B300 vs H100)
+
+Bitwise identical training across NVIDIA SM_90 (H100) and SM_100 (B300) with
+the same patch stack. Loss + grad_norm + validation match every iter.
+
+| Model      | TP | Iters | Result |
+|------------|----|-------|--------|
+| Qwen3-0.6B | 1  | 100   | Bitwise identical |
+| Qwen3-8B   | 4  | 100   | Bitwise identical |
+
+![B300 vs H100 (Qwen3-0.6B, TP=1)](assets/b300_vs_h100_tp1_invariant.png)
+
+Logs: `results/cross-arch/`. Reproduce with the Quick Start commands on each
+GPU; numeric diff:
+
+```bash
+diff <(grep -oP "lm loss: \S+|grad norm: \S+" results/cross-arch/qwen3_0.6b_unfused_tp1_100iter_b300.log) \
+     <(grep -oP "lm loss: \S+|grad norm: \S+" results/cross-arch/qwen3_0.6b_unfused_tp1_100iter_h100.log)
+# Empty output = bitwise identical.
+```
+
+Plot any pair with `plot_loss.py` (matplotlib): `python plot_loss.py <log_a> <label_a> <log_b> <label_b> <out.png>`.
 
 ## Performance Overhead (Qwen3-8B, 4x H100, TP=4, auto/cuDNN)
 
